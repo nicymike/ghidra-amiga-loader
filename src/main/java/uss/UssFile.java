@@ -8,6 +8,7 @@ import java.util.zip.Inflater;
 import ghidra.app.util.bin.BinaryReader;
 import ghidra.app.util.bin.ByteArrayProvider;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -64,7 +65,7 @@ public class UssFile {
 			}
 			// alignment
 			reader.setPointerIndex(reader.getPointerIndex() + 4 - (len & 3)); // yes, bug in WinUAE
-			System.out.format("Chunk '%s' size '%s' (%d)\n", chunk.name, len, chunk.buffer.length);
+			Msg.debug(UssFile.class, String.format("Chunk '%s' size '%s' (%d)", chunk.name, len, chunk.buffer.length));
 			return chunk;
 		} catch(IOException | DataFormatException e) {
 			return null;
@@ -140,7 +141,7 @@ public class UssFile {
 		}
 		memBlocks.add(new MemoryRegion("Custom", customBase, custom)); 
 		for(var mem: memBlocks)
-			System.out.format("*Mem* $%08x+$%08x = '%s'\n", mem.start, mem.length, mem.name);
+			Msg.debug(UssFile.class, String.format("*Mem* $%08x+$%08x = '%s'", mem.start, mem.length, mem.name));
 	}
 
 	private void readAud(int i, byte[] buffer) throws IOException {
@@ -162,7 +163,7 @@ public class UssFile {
 		var gfxmem_bank = reader.readNextUnsignedInt();
 		var rtarea_base = reader.readNextUnsignedInt();
 		fastMem1Addr = reader.readNextUnsignedInt();
-		System.out.format("  fram0 $%x, z3ram $%x, fram1 $%x\n", fastMem0Addr, z3fastMemAddr, fastMem1Addr);
+		Msg.debug(UssFile.class, String.format("  fram0 $%x, z3ram $%x, fram1 $%x", fastMem0Addr, z3fastMemAddr, fastMem1Addr));
 	}
 
 	private void readHeader(byte[] buffer) throws IOException {
@@ -171,7 +172,7 @@ public class UssFile {
 		emuName = reader.readNextAsciiString();
 		emuVersion = reader.readNextAsciiString();
 		description = reader.readNextAsciiString();
-		System.out.format("  Saved with '%s %s', description: '%s'\n", emuName, emuVersion, description);
+		Msg.debug(UssFile.class, String.format("  Saved with '%s %s', description: '%s'", emuName, emuVersion, description));
 	}
 
 	private void readRom(byte[] buffer) throws IOException {
@@ -180,13 +181,13 @@ public class UssFile {
 		var size = reader.readNextUnsignedInt();
 		reader.setPointerIndex(20);
 		romId = reader.readNextAsciiString();
-		System.out.format("  ROM: '%s' @ $%08x+$%08x\n", romId, start, size);
+		Msg.debug(UssFile.class, String.format("  ROM: '%s' @ $%08x+$%08x", romId, start, size));
 		memBlocks.add(new MemoryRegion("ROM", start, size));
 	}
 
 	private void readChip(byte[] buffer) throws IOException {
 		var reader = new BinaryReader(new ByteArrayProvider(buffer), false);
-		var chipsetFlags = reader.readNextUnsignedInt();
+		chipsetFlags = reader.readNextUnsignedInt();
 		System.arraycopy(reader.readNextByteArray(0xa0), 0, custom, 0, 0xa0);
 		System.arraycopy(reader.readNextByteArray(0x120 - 0xe0), 0, custom, 0xe0, 0x120 - 0xe0);
 		System.arraycopy(reader.readNextByteArray(0x200 - 0x180), 0, custom, 0x180, 0x200 - 0x180);
@@ -197,8 +198,9 @@ public class UssFile {
 
 	private void readCpu(byte[] buffer) throws IOException {
 		var reader = new BinaryReader(new ByteArrayProvider(buffer), false);
-		var cpuModel = reader.readNextUnsignedInt();
-		var cpuFlags = reader.readNextUnsignedInt();
+		cpuModel = reader.readNextUnsignedInt();
+		cpuFlags = reader.readNextUnsignedInt();
+		// D0-D7, A0-A6 and the PC
 		for(int i = 0; i < 16; i++)
 			registers[i] = reader.readNextUnsignedInt();
 	}

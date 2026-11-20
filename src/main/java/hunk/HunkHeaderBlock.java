@@ -9,6 +9,7 @@ import ghidra.app.util.bin.BinaryReader;
 class HunkHeaderBlock extends HunkBlock {
 
 	private List<Integer> hunkTable;
+	private List<Integer> memoryFlagsTable = new ArrayList<>();
 
 	HunkHeaderBlock(BinaryReader reader, boolean isExecutable) throws HunkParseError {
 		super(HunkType.HUNK_HEADER, reader);
@@ -46,19 +47,29 @@ class HunkHeaderBlock extends HunkBlock {
 			}
 			
 			for (int a = 0; a < lastHunk - firstHunk + 1; ++a) {
+				// The upper two bits of the size are the memory type (1 = CHIP, 2 = FAST). If both are set,
+				// another longword with the actual memory attributes (MEMF_*) follows.
 				int hunkSize = reader.readNextInt();
-				
-				if (hunkSize < 0) {
-					throw new HunkParseError("HUNK_HEADER contains invalid hunk_size");
+				int memoryFlags = hunkSize >>> 30;
+				if (memoryFlags == HunkSegment.MEMORY_EXTENDED) {
+					// The exact MEMF_* attributes are not evaluated
+					reader.readNextInt();
 				}
-				
 				hunkTable.add(hunkSize & 0x3FFFFFFF);
+				memoryFlagsTable.add(memoryFlags);
 			}
 		} catch (IOException e) {
 			throw new HunkParseError(e);
 		}
 	}
 
+	/**
+	 * Memory type per hunk (MEMORY_*)
+	 */
+	Integer[] getMemoryFlags() {
+		return memoryFlagsTable.toArray(Integer[]::new);
+	}
+	
 	Integer[] getHunkTable() {
 		return hunkTable.toArray(Integer[]::new);
 	}

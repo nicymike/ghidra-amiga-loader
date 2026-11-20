@@ -247,9 +247,6 @@ public class FdParser {
 					}
 					if(line.charAt(p_arg) == ' ') p_arg++;
 				}
-				//System.out.format("%s returns '%s' = -$%x\n", func.getName(false), func.getReturnType(), Math.abs(func.getBias()));
-				//for(var arg : func.getArgs())
-				//	System.out.format("\t'%s' '%s' (%s)\n", arg.name, arg.type, arg.reg);
 				if(!isAlias)
 					funcTable.addFunction(func);
 				isVarargs = false;

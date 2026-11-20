@@ -91,16 +91,11 @@ public class Relocate {
 			int delta = buf.getInt(offset) + reloc.getAddend();
 			buf.putInt(offset, (int)(sectAddr + delta));
 		} break;
-		case 2: {
-			System.out.println(String.format("Word reloc at 0x%08X, delta: %d", offset, buf.getShort(offset)));
-			// int delta = buf.getShort(offset) + reloc.getAddend();
-			// buf.putShort(offset, (short)(sectAddr + delta - offset));
-		} break;
-		case 1: {
-			System.out.println(String.format("Byte reloc at 0x%08X, delta: %d", offset, buf.get(offset)));
-			// int delta = buf.get(offset) + reloc.getAddend();
-			// buf.put(offset, (byte)(sectAddr + delta - offset));
-		} break;
+		case 2:
+		case 1:
+			// 16 and 8 bit relocations are PC- or base-relative and cannot be applied to a flat image; the data stays
+			// unchanged (the loader records them as unsupported relocations)
+			break;
 		}
 	}
 }

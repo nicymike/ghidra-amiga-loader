@@ -15,6 +15,8 @@
  */
 package amiga;
 
+import ghidra.app.util.Option;
+import ghidra.framework.model.DomainObject;
 import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.bin.ByteProviderInputStream;
 import ghidra.app.util.importer.MessageLog;
@@ -62,20 +64,33 @@ public class AmigaKickstartLoader extends AbstractLibrarySupportLoader {
 
 		try {
 			loadKickstart(provider, loadSpec.getDesiredImageBase(), fpa, monitor, mem, log);
-		} catch (Throwable e) {
-			e.printStackTrace();
+			if (AmigaUtils.isAssemblyAnalysisEnabled(importerSettings.options())) {
+				AmigaUtils.prepareAnalysisForAssembly(program, log);
+			}
+		} catch (IOException e) {
+			throw e;
+		} catch (Exception e) {
 			log.appendException(e);
+			throw new IOException("Could not load: " + e.getMessage(), e);
 		}
 	}
 
-	private static void loadKickstart(ByteProvider provider, long imageBase, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Throwable {
+	private static void loadKickstart(ByteProvider provider, long imageBase, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Exception {
 		var block = AmigaUtils.createSegment(new ByteProviderInputStream(provider), fpa, "ROM", imageBase, provider.length(), false, true, log);
 		var startAddr = block.getStart().add(2);
 
 		var fdm = fpa.openDataTypeArchive(Application.getModuleDataFile("amiga_ndk39.gdt").getFile(false), true);
 		AmigaUtils.createCustomSegment(fpa, fdm, log);
+		AmigaUtils.createCiaSegments(fpa, fdm, log);
 		AmigaUtils.addTypes(fpa.getCurrentProgram(), log);
 		AmigaUtils.analyzeResident(mem, fpa, fdm, startAddr, log);
 		AmigaUtils.setFunction(fpa, startAddr, "start", log);
+	}
+
+	@Override
+	public List<Option> getDefaultOptions(ByteProvider provider, LoadSpec loadSpec, DomainObject domainObject, boolean loadIntoProgram, boolean mirrorFsLayout) {
+		var list = new ArrayList<Option>(super.getDefaultOptions(provider, loadSpec, domainObject, loadIntoProgram, mirrorFsLayout));
+		list.add(AmigaUtils.createAssemblyAnalysisOption());
+		return list;
 	}
 }

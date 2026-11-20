@@ -37,6 +37,13 @@ public class Segment {
 		return segSize;
 	}
 
+    /**
+     * The data of the hunk as it is in the file (without applied relocations). Null for BSS.
+     */
+    public byte[] getOriginalData() {
+		return data;
+	}
+
     byte[] getData() {
 		return data;
 	}

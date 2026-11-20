@@ -19,7 +19,8 @@ class HunkSegmentBlock extends HunkBlock {
 	@Override
 	void parse(BinaryReader reader, boolean isExecutable) throws HunkParseError {
 		try {
-			int size = sizeLongs = reader.readNextInt();
+			// The upper two bits are memory flags (see HUNK_HEADER) and not part of the size
+			int size = sizeLongs = reader.readNextInt() & 0x3FFFFFFF;
 			
 			if (super.getHunkType() != HunkType.HUNK_BSS) {
 				size *= 4;

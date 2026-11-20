@@ -63,7 +63,7 @@ public class AmigaHunkLibFileSystem implements GFileSystem {
 	 * 
 	 * @param monitor A cancellable task monitor.
 	 */
-	public void mount(TaskMonitor monitor) {
+	public void mount(TaskMonitor monitor) throws IOException {
 		monitor.setMessage("Opening " + AmigaHunkLibFileSystem.class.getSimpleName() + "...");
 
 		BinaryReader reader = new BinaryReader(provider, false);
@@ -96,8 +96,6 @@ public class AmigaHunkLibFileSystem implements GFileSystem {
 						if (firstLibUnitOffset[0] == -1) {
 							firstLibUnitOffset[0] = block.first;
 						}
-						
-						System.out.println(String.format("0x%08X - %s", block.first, block.second.getClass().getSimpleName()));
 					}
 					
 					libBlock = (HunkLibBlock)bb;
@@ -123,21 +121,8 @@ public class AmigaHunkLibFileSystem implements GFileSystem {
 						
 						offsetAndName.add(new Pair<Integer, String>(firstLibUnitOffset[0] + offset, unitEntry.getName()));
 						
-						System.out.println(String.format("HunkOffset: 0x%08X, Name: %s", firstLibUnitOffset[0] + offset, unitEntry.getName()));
-						
 						// int subItemSiz = ((i + 1 == blocks.size()) || ((i + 1 < blocks.size()) && (blocks.get(i + 1).second.getHunkType() == HunkType.HUNK_UNIT)));
 						
-//						for (HunkIndexHunkEntry hunkEntry : unitEntry.getHunkIndexHunkEntries()) {
-//							System.out.println(String.format("Entry name: %s, Type: %s, Size: %d", hunkEntry.getName(), HunkType.fromInteger(hunkEntry.getHunkCtype()).name(), hunkEntry.getHunkLongs() * 4));
-//							
-//							for (HunkIndexSymbolDef symDef : hunkEntry.getSymDefs()) {
-//								System.out.println(String.format("Def name: %s, Value: %d, Type: %d", symDef.getName(), symDef.getValue(), symDef.getSymCtype()));
-//							}
-//							
-//							for (HunkIndexSymbolRef symRef : hunkEntry.getSymRefs()) {
-//								System.out.println(String.format("Ref name: %s, Width: %d", symRef.getName(), symRef.getWidth()));
-//							}
-//						}
 					}
 					
 					List<Pair<String, Pair<Integer, Integer>>> nameAndSizeOffset = new ArrayList<>();

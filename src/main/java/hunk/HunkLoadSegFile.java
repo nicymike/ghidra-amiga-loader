@@ -115,10 +115,13 @@ class HunkLoadSegFile {
 		
 		if (!isUnit) {
 			int n = second.size();
+			Integer[] sizes = hdr.getHunkTable();
+			Integer[] memoryFlags = hdr.getMemoryFlags();
 			
 			for (int i = 0; i < n; ++i) {
 				HunkSegment seg = segments.get(i);
-				seg.setSizeLongs(hdr.getHunkTable()[i]);
+				seg.setSizeLongs(sizes[i]);
+				seg.setMemoryFlags(memoryFlags[i]);
 				segments.set(i, seg);
 			}
 		}

@@ -15,7 +15,9 @@ import fd.FdFunction;
 import fd.FdFunctionsInLibs;
 import fd.FdLibFunctions;
 import fd.FdParser;
+import ghidra.app.util.Option;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.app.util.opinion.Loader;
 import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressOutOfBoundsException;
@@ -40,6 +42,7 @@ import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.exception.DuplicateNameException;
+import ghidra.util.SystemUtilities;
 import ghidra.util.exception.InvalidInputException;
 import structs.CopperInst;
 import structs.InitData_Type;
@@ -76,6 +79,9 @@ public class AmigaUtils {
 
 	public static void createExecBaseSegment(FlatProgramAPI fpa, FileDataTypeManager fdm, MessageLog log) {
 		MemoryBlock exec = createSegment(null, fpa, "EXEC", 0x4, 4, false, false, log);
+		if (exec == null) {
+			return;
+		}
 		
 		Program program = fpa.getCurrentProgram();
 
@@ -87,9 +93,11 @@ public class AmigaUtils {
 	}
 
 	public static void createCustomSegment(FlatProgramAPI fpa, FileDataTypeManager fdm, MessageLog log) {
-		// TODO: CIA
 		log.appendMsg("Creating custom chips memory block");
 		var block = createSegment(null, fpa, "Custom", 0xdff000, 0x200, true, false, log);
+		if (block == null) {
+			return;
+		}
 		var program = fpa.getCurrentProgram();
 		try {
 			var regs = AmigaUtils.getAmigaDataType(fdm, "Custom");
@@ -98,6 +106,96 @@ public class AmigaUtils {
 		} catch (Exception e) {
 			log.appendException(e);
 		}
+	}
+
+	/**
+	 * Creates the registers of the two CIAs (8520). CIA-A is on the odd addresses and CIA-B on the even
+	 * addresses of their respective side, so CIA-A starts at 0xBFE001 and CIA-B at 0xBFD000.
+	 */
+	public static void createCiaSegments(FlatProgramAPI fpa, FileDataTypeManager fdm, MessageLog log) {
+		var cia = getAmigaDataType(fdm, "CIA");
+		if (cia == null) {
+			log.appendMsg("Data type CIA not found, no CIA registers created");
+			return;
+		}
+		createCiaSegment(fpa, cia, "CIAA", 0xbfe001, "CIA-A (keyboard, parallel port, game port buttons, timers)", log);
+		createCiaSegment(fpa, cia, "CIAB", 0xbfd000, "CIA-B (disk control, serial port control, timers)", log);
+	}
+	
+	private static void createCiaSegment(FlatProgramAPI fpa, DataType cia, String name, long address, String comment, MessageLog log) {
+		var block = createSegment(null, fpa, name, address, cia.getLength(), true, false, log);
+		if (block == null) {
+			return;
+		}
+		try {
+			block.setComment(comment);
+			DataUtilities.createData(fpa.getCurrentProgram(), block.getStart(), cia, -1, false, ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+			fpa.createLabel(block.getStart(), name.toLowerCase(), false);
+		} catch (Exception e) {
+			log.appendException(e);
+		}
+	}
+
+	/** Name of the loader option that prepares the analyzers for hand-written assembly code */
+	public static final String OPTION_ASSEMBLY_ANALYSIS = "Prepare analysis for hand-written assembly";
+	
+	/**
+	 * Analysis options that get in the way of hand-written 68k assembly (typical for Amiga games), with the value
+	 * they are set to:
+	 * <ul>
+	 * <li>The call fixup installer and the detection of non-returning functions assume that the code follows
+	 * C conventions, which assembly code does not. They disturb the detection of code after JSR/BSR.</li>
+	 * <li>Unicode string detection finds false strings, as Amiga programs mostly predate Unicode.</li>
+	 * </ul>
+	 */
+	private static final String[] ASSEMBLY_ANALYSIS_OPTIONS = {
+		"Call-Fixup Installer",
+		"Non-Returning Functions - Discovered",
+		"Data Reference.Unicode String References",
+		"Reference.Unicode String References",
+	};
+	
+	/**
+	 * The loader option that switches the analysis preparation for assembly code on or off (on by default).
+	 */
+	public static Option createAssemblyAnalysisOption() {
+		// (Options created with the builders can also be set from the command line in headless mode)
+		return Option.newBoolean(OPTION_ASSEMBLY_ANALYSIS)
+			.value(true)
+			.commandLineArgument(Loader.COMMAND_LINE_ARG_PREFIX + "-assemblyAnalysis")
+			.description("Switch off the analyzers that get in the way of hand-written assembly (call fixups, non-returning functions, Unicode strings)")
+			.build();
+	}
+	
+	/**
+	 * @return true unless the option is given and switched off
+	 */
+	public static boolean isAssemblyAnalysisEnabled(List<Option> options) {
+		if (options != null) {
+			for (Option option : options) {
+				if (option.getName().equals(OPTION_ASSEMBLY_ANALYSIS) && option.getValue() instanceof Boolean enabled) {
+					return enabled;
+				}
+			}
+		}
+		return true;
+	}
+	
+	/**
+	 * Switches the analyzers off that get in the way of hand-written assembly. They stay switched off in the
+	 * "Auto Analyze" dialog and can be switched on again there.
+	 */
+	public static void prepareAnalysisForAssembly(Program program, MessageLog log) {
+		int transId = program.startTransaction("Prepare analysis options");
+		try {
+			var analysisOptions = program.getOptions(Program.ANALYSIS_PROPERTIES);
+			for (var name : ASSEMBLY_ANALYSIS_OPTIONS) {
+				analysisOptions.setBoolean(name, false);
+			}
+		} finally {
+			program.endTransaction(transId, true);
+		}
+		log.appendMsg("Switched off analyzers for hand-written assembly: " + String.join(", ", ASSEMBLY_ANALYSIS_OPTIONS));
 	}
 
 	public static void addTypes(Program program, MessageLog log) {
@@ -121,7 +219,7 @@ public class AmigaUtils {
 	public static void analyzeResident(Memory mem, FlatProgramAPI fpa, FileDataTypeManager fdm, Address startAddr, MessageLog log) {
 		Program program = fpa.getCurrentProgram();
 		ReferenceManager refMgr = program.getReferenceManager();
-		var funcsList = new FdFunctionsInLibs();
+		var funcsList = FdFunctionsInLibs.getInstance();
 
 		try {
 			while (true) {
@@ -224,11 +322,16 @@ public class AmigaUtils {
 							funcTable = funcsList.getFunctionTableByLib(libName);
 
 						if(funcTable == null && !askedForFd && i >= 4) {
-							TimeUnit.SECONDS.sleep(1);
-							if (OptionDialog.YES_OPTION == OptionDialog.showYesNoDialogWithNoAsDefaultButton(null,
-									"Question", String.format("Do you have %s.sfd file for this library?", rt_Name))) {
-								String fdPath = showSelectFile("Select file...");
-								funcTable = FdParser.readSfdFile(fdPath);
+							// The question needs a user interface, which does not exist in headless mode
+							if (!SystemUtilities.isInHeadlessMode()) {
+								TimeUnit.SECONDS.sleep(1);
+								if (OptionDialog.YES_OPTION == OptionDialog.showYesNoDialogWithNoAsDefaultButton(null,
+										"Question", String.format("Do you have %s.sfd file for this library?", rt_Name))) {
+									String fdPath = showSelectFile("Select file...");
+									if (fdPath != null) {
+										funcTable = FdParser.readSfdFile(fdPath);
+									}
+								}
 							}
 							askedForFd = true;
 						}

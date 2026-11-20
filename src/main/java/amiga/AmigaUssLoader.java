@@ -16,6 +16,8 @@
 package amiga;
 
 import ghidra.app.util.bin.BinaryReader;
+import ghidra.app.util.Option;
+import ghidra.framework.model.DomainObject;
 import ghidra.app.util.bin.ByteProvider;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
@@ -69,13 +71,18 @@ public class AmigaUssLoader extends AbstractLibrarySupportLoader {
 
 		try {
 			loadUss(provider, fpa, monitor, mem, log);
-		} catch (Throwable e) {
-			e.printStackTrace();
+			if (AmigaUtils.isAssemblyAnalysisEnabled(importerSettings.options())) {
+				AmigaUtils.prepareAnalysisForAssembly(program, log);
+			}
+		} catch (IOException e) {
+			throw e;
+		} catch (Exception e) {
 			log.appendException(e);
+			throw new IOException("Could not load: " + e.getMessage(), e);
 		}
 	}
 
-	private static void loadUss(ByteProvider provider, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Throwable {
+	private static void loadUss(ByteProvider provider, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Exception {
 		var uss = new UssFile(new BinaryReader(provider, false), monitor, log);
 		for(var m : uss.memBlocks) {
 			var block = AmigaUtils.createSegment(m.content != null ? new ByteArrayInputStream(m.content) : null, fpa, m.name, m.start, m.length, true, true, log);
@@ -109,5 +116,12 @@ public class AmigaUssLoader extends AbstractLibrarySupportLoader {
 
 		//AmigaUtils.analyzeResident(mem, fpa, fdm, startAddr, log);
 		//AmigaUtils.setFunction(fpa, startAddr, "start", log);
+	}
+
+	@Override
+	public List<Option> getDefaultOptions(ByteProvider provider, LoadSpec loadSpec, DomainObject domainObject, boolean loadIntoProgram, boolean mirrorFsLayout) {
+		var list = new ArrayList<Option>(super.getDefaultOptions(provider, loadSpec, domainObject, loadIntoProgram, mirrorFsLayout));
+		list.add(AmigaUtils.createAssemblyAnalysisOption());
+		return list;
 	}
 }

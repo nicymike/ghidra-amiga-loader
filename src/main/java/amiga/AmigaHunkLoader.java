@@ -35,6 +35,7 @@ import ghidra.program.model.lang.Language;
 import ghidra.program.model.lang.LanguageCompilerSpecPair;
 import ghidra.program.model.lang.LanguageNotFoundException;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.reloc.Relocation;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
@@ -46,14 +47,18 @@ import ghidra.util.task.TaskMonitor;
 import hunk.*;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
 public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 	public static final int DEF_IMAGE_BASE = 0x21F000;
+	private static final long MIN_IMAGE_BASE = 0x1000L;
+	private static final long MAX_IMAGE_BASE = 0x700000L;
 
 	static final String OPTION_NAME = "ImageBase";
 	public static Address imageBase = null;
@@ -86,7 +91,8 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 	}
 
 	@Override
-	protected void load(Program program, ImporterSettings importerSettings)  {
+	protected synchronized void load(Program program, ImporterSettings importerSettings) throws IOException {
+		// synchronized: the loader keeps state (image base, counters of the created blocks) in static fields
 		refsLastIndex = 0;
 		defsLastIndex = 0;
 		
@@ -98,6 +104,12 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		TaskMonitor monitor = importerSettings.monitor();
 
 		BinaryReader reader = new BinaryReader(provider, false);
+		
+		// Use the image base of this import (validateOptions is not necessarily called before, e.g. in headless mode)
+		var optionImageBase = findImageBase(importerSettings.options());
+		if (optionImageBase != null) {
+			imageBase = optionImageBase;
+		}
 
 		// executable
 		HunkBlockType type = HunkBlockFile.peekType(reader);
@@ -105,31 +117,36 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
         try {
             hbf = new HunkBlockFile(reader, type == HunkBlockType.TYPE_LOADSEG);
         } catch (HunkParseError e) {
- 			e.printStackTrace();
 			log.appendException(e);
+			throw new IOException("Invalid hunk file: " + e.getMessage(), e);
         }
         switch (type) {
 		case TYPE_LOADSEG: 
 		case TYPE_UNIT:
 			try {
 				loadExecutable(imageBase, type == HunkBlockType.TYPE_LOADSEG, hbf, fpa, monitor, mem, log);
-			} catch (Throwable e) {
-				e.printStackTrace();
+				if (AmigaUtils.isAssemblyAnalysisEnabled(importerSettings.options())) {
+					AmigaUtils.prepareAnalysisForAssembly(program, log);
+				}
+			} catch (IOException e) {
+				throw e;
+			} catch (Exception e) {
 				log.appendException(e);
+				throw new IOException("Could not load hunk file: " + e.getMessage(), e);
 			}
 		break;
 		case TYPE_LIB:
-		break;
+			throw new IOException("Hunk libraries (HUNK_LIB) cannot be loaded as a program");
 		default:
-		break;
+			throw new IOException("Unsupported hunk file type");
 		}
 	}
 
-	private static void loadExecutable(Address imageBase, boolean isExecutable, HunkBlockFile hbf, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Throwable {
+	private static void loadExecutable(Address imageBase, boolean isExecutable, HunkBlockFile hbf, FlatProgramAPI fpa, TaskMonitor monitor, Memory mem, MessageLog log) throws Exception {
 		BinImage bi = BinFmtHunk.loadImage(hbf, log);
 		
 		if (bi == null) {
-			return;
+			throw new IOException("Could not create an image from the hunks, see the log");
 		}
 		
 		int _imageBase = getImageBase(0);
@@ -141,7 +158,7 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 			datas = rel.relocate(addrs);
 		} catch (HunkParseError e1) {
 			log.appendException(e1);
-			return;
+			throw new IOException("Could not relocate the hunks: " + e1.getMessage(), e1);
 		}
 		
 		int lastSectAddress = 0;
@@ -161,9 +178,16 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 			}
 
 			boolean exec = seg.getType() == SegmentType.SEGMENT_TYPE_CODE;
-			boolean write = seg.getType() == SegmentType.SEGMENT_TYPE_DATA;
+			// Data and BSS are written to, code is not
+			boolean write = seg.getType() != SegmentType.SEGMENT_TYPE_CODE;
 
-			AmigaUtils.createSegment(segBytes, fpa, seg.getName(), segOffset, size, write, exec, log);
+			var block = AmigaUtils.createSegment(segBytes, fpa, seg.getName(), segOffset, size, write, exec, log);
+			if (block != null) {
+				var memory = getMemoryDescription(seg.getSegmentInfo().getMemoryFlags());
+				if (memory != null) {
+					block.setComment(memory);
+				}
+			}
 			relocateSegment(seg, segOffset, datas, mem, fpa, log);
 		}
 		
@@ -178,6 +202,7 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		var fdm = fpa.openDataTypeArchive(Application.getModuleDataFile("amiga_ndk39.gdt").getFile(false), true);
 		AmigaUtils.createExecBaseSegment(fpa, fdm, log);
 		AmigaUtils.createCustomSegment(fpa, fdm, log);
+		AmigaUtils.createCiaSegments(fpa, fdm, log);
 		AmigaUtils.addTypes(fpa.getCurrentProgram(), log);
 		AmigaUtils.analyzeResident(mem, fpa, fdm, startAddr, log);
 		
@@ -187,7 +212,23 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		addSymbols(bi.getSegments(), fpa.getCurrentProgram().getSymbolTable(), addrs, fpa);
 	}
 
-	private static void addSymbols(Segment segs[], SymbolTable st, int addrs[], FlatProgramAPI fpa) throws Throwable {
+	/**
+	 * Description of the memory type from the hunk header, null for any memory
+	 */
+	private static String getMemoryDescription(int memoryFlags) {
+		switch (memoryFlags) {
+		case HunkSegment.MEMORY_CHIP:
+			return "Loaded into CHIP RAM";
+		case HunkSegment.MEMORY_FAST:
+			return "Loaded into FAST RAM";
+		case HunkSegment.MEMORY_EXTENDED:
+			return "Loaded with extended memory attributes";
+		default:
+			return null;
+		}
+	}
+
+	private static void addSymbols(Segment segs[], SymbolTable st, int addrs[], FlatProgramAPI fpa) throws Exception {
 		for (Segment seg : segs) {
 			hunk.Symbol[] symbols = seg.getSymbols(seg);
 			if(symbols.length > 0) {
@@ -202,38 +243,53 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 
 	private static void relocateSegment(Segment seg, int segOffset, final List<byte[]> datas, Memory mem, FlatProgramAPI fpa, MessageLog log) {
 		Segment[] toSegs = seg.getRelocationsToSegments();
+		int unsupported = 0;
 
 		for (Segment toSeg : toSegs) {
 			Reloc[] reloc = seg.getRelocations(toSeg);
 
 			for (Reloc r : reloc) {
 				int dataOffset = r.getOffset();
+				Address address = fpa.toAddr(segOffset + dataOffset);
+				
+				if (r.getWidth() != 4) {
+					// Only 32-bit relocations are applied (see Relocate): record the others, but do not touch the data
+					unsupported++;
+					mem.getProgram().getRelocationTable().add(address, Relocation.Status.UNSUPPORTED, r.getWidth(), null, null, null);
+					continue;
+				}
 
 				ByteBuffer buf = ByteBuffer.wrap(datas.get(seg.getId()));
-				int newAddr = 0;
-				
 				try {
-					switch (r.getWidth()) {
-					case 4:
-						newAddr = buf.getInt(dataOffset) + r.getAddend();
-						break;
-					case 2:
-						newAddr = buf.getShort(dataOffset) + r.getAddend();
-						break;
-					case 1:
-						newAddr = buf.get(dataOffset) + r.getAddend();
-						break;
-					}
-					patchReference(mem, fpa.toAddr(segOffset + dataOffset), newAddr, r.getWidth());
-				} catch (MemoryAccessException | CodeUnitInsertionException e) {
-					log.appendException(e);
-					return;
+					int newAddr = buf.getInt(dataOffset) + r.getAddend();
+					patchReference(mem, address, newAddr, r.getWidth());
+					addRelocation(mem, seg, address, dataOffset, newAddr, r.getWidth());
+				} catch (MemoryAccessException | CodeUnitInsertionException | IndexOutOfBoundsException e) {
+					// One bad relocation must not stop the others
+					log.appendMsg(String.format("Could not apply relocation at %s: %s", address, e.getMessage()));
 				}
 			}
 		}
+		
+		if (unsupported > 0) {
+			log.appendMsg(String.format("%s: %d relocations of 8 or 16 bit are not supported and were not applied", seg.getName(), unsupported));
+		}
 	}
 	
-	private static void applySegmentDefs(Segment seg, int segOffset, FlatProgramAPI fpa, SymbolTable st, MessageLog log, int lastSectAddress) throws Throwable {
+	/**
+	 * Adds the relocation to the relocation table of Ghidra (the data is already adjusted).
+	 */
+	private static void addRelocation(Memory mem, Segment seg, Address address, int dataOffset, int value, int width) {
+		var original = seg.getOriginalData();
+		byte[] originalBytes = null;
+		if (original != null && dataOffset >= 0 && dataOffset + width <= original.length) {
+			originalBytes = Arrays.copyOfRange(original, dataOffset, dataOffset + width);
+		}
+		mem.getProgram().getRelocationTable().add(address, Relocation.Status.APPLIED, width, 
+			new long[] { value & 0xFFFFFFFFL }, originalBytes, null);
+	}
+	
+	private static void applySegmentDefs(Segment seg, int segOffset, FlatProgramAPI fpa, SymbolTable st, MessageLog log, int lastSectAddress) throws Exception {
 		if (seg.getSegmentInfo().getDefinitions() == null) {
 			return;
 		}
@@ -302,7 +358,7 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		instructionStasher.restore();
 	}
 
-	private static int addReference(Memory mem, FlatProgramAPI fpa, SymbolTable st, String name, int lastSectAddress) throws Throwable {
+	private static int addReference(Memory mem, FlatProgramAPI fpa, SymbolTable st, String name, int lastSectAddress) throws Exception {
 		List<Symbol> syms = st.getGlobalSymbols(name);
 		
 		if (syms.size() > 0) {
@@ -326,7 +382,7 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		return (int) newAddress.getOffset();
 	}
 	
-	private static int addDefinition(Memory mem, FlatProgramAPI fpa, SymbolTable st, String name, int value) throws Throwable {
+	private static int addDefinition(Memory mem, FlatProgramAPI fpa, SymbolTable st, String name, int value) throws Exception {
 		List<Symbol> syms = st.getGlobalSymbols(name);
 		
 		if (syms.size() > 0) {
@@ -352,7 +408,7 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		return (int) newAddress.getOffset();
 	}
 	
-	private static void expandBlockByDword(Memory mem, MemoryBlock block, Address appendAddress, boolean initialized) throws Throwable {
+	private static void expandBlockByDword(Memory mem, MemoryBlock block, Address appendAddress, boolean initialized) throws Exception {
 		if (block.getStart().equals(appendAddress)) {
 			return;
 		}
@@ -390,10 +446,15 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		try {
 			Language importerLanguage = getLanguageService().getLanguage(pair.languageID);
 			imageBase = importerLanguage.getAddressFactory().getDefaultAddressSpace().getAddress(DEF_IMAGE_BASE);
-			list.add(new Option(OPTION_NAME, imageBase, Address.class, Loader.COMMAND_LINE_ARG_PREFIX + "-baseAddr"));
+			list.add(Option.newAddress(OPTION_NAME)
+				.value(imageBase)
+				.commandLineArgument(Loader.COMMAND_LINE_ARG_PREFIX + "-baseAddr")
+				.description("Address at which the first hunk is loaded")
+				.build());
 		} catch (LanguageNotFoundException e) {
 
 		}
+		list.add(AmigaUtils.createAssemblyAnalysisOption());
 
 		return list;
 	}
@@ -403,27 +464,35 @@ public class AmigaHunkLoader extends AbstractLibrarySupportLoader {
 		imageBase = null;
 
 		for (Option option : options) {
-			String optName = option.getName();
-			try {
-				if (optName.equals(OPTION_NAME)) {
-					imageBase = (Address) option.getValue();
-
-					long val = imageBase.getOffset();
-					if (val >= 0x1000L && val <= 0x700000L) {
-						break;
-					}
-				}
-			} catch (Exception e) {
-				if (e instanceof OptionException) {
-					return e.getMessage();
-				}
-				return "Invalid value for " + optName + " - " + option.getValue();
+			if (!option.getName().equals(OPTION_NAME)) {
+				continue;
 			}
+			if (!(option.getValue() instanceof Address address)) {
+				return "Invalid value for " + option.getName() + " - " + option.getValue();
+			}
+			if (address.getOffset() < MIN_IMAGE_BASE || address.getOffset() > MAX_IMAGE_BASE) {
+				// The upper limit keeps the program away from the memory blocks for the CIAs and the custom chips
+				return String.format("Image base must be between 0x%X and 0x%X", MIN_IMAGE_BASE, MAX_IMAGE_BASE);
+			}
+			imageBase = address;
 		}
-		if (imageBase == null || (imageBase.getOffset() < 0x1000L) || (imageBase.getOffset() >= 0x80000000L)) {
+		if (imageBase == null) {
 			return "Invalid image base";
 		}
-
+		return null;
+	}
+	
+	/**
+	 * @return the image base from the options, or null if there is none
+	 */
+	private static Address findImageBase(List<Option> options) {
+		if (options != null) {
+			for (Option option : options) {
+				if (option.getName().equals(OPTION_NAME) && option.getValue() instanceof Address address) {
+					return address;
+				}
+			}
+		}
 		return null;
 	}
 }

@@ -18,6 +18,16 @@ public class HunkSegment {
 	private HunkExtBlock extBlock;
 	
 	private String name;
+	/** Memory type in the hunk header: any */
+	public static final int MEMORY_ANY = 0;
+	/** Memory type in the hunk header: chip RAM */
+	public static final int MEMORY_CHIP = 1;
+	/** Memory type in the hunk header: fast RAM */
+	public static final int MEMORY_FAST = 2;
+	/** Both bits set: the attributes are in another longword */
+	public static final int MEMORY_EXTENDED = 3;
+	
+	private int memoryFlags = MEMORY_ANY;
 	
 	HunkSegment() {
 		segBlock = null;
@@ -32,6 +42,17 @@ public class HunkSegment {
 	
 	HunkType getHunkType() {
 		return (segBlock != null) ? segBlock.getHunkType() : HunkType.HUNK_BAD_TYPE;
+	}
+	
+	void setMemoryFlags(int memoryFlags) {
+		this.memoryFlags = memoryFlags;
+	}
+	
+	/**
+	 * @return the memory type according to the hunk header (MEMORY_ANY, MEMORY_CHIP, MEMORY_FAST)
+	 */
+	public int getMemoryFlags() {
+		return memoryFlags;
 	}
 	
 	void setSizeLongs(int sizeLongs) {
